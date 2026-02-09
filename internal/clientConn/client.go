@@ -6,49 +6,40 @@ import (
 
 	"github.com/Eanhain/gophkeeper-client/contracts/request"
 	"github.com/Eanhain/gophkeeper-client/contracts/response"
+	"github.com/Eanhain/gophkeeper-client/internal/crypto"
 	"github.com/gofiber/fiber/v2"
 )
 
 type Client struct {
-	baseURL string
+	baseURL   string
+	cryptoKey []byte
 }
 
-func New(host, port string) *Client {
+func New(host, port, cryptoKey string) *Client {
 	return &Client{
-		baseURL: fmt.Sprintf("http://%s:%s/v1/api/user", host, port),
+		baseURL:   fmt.Sprintf("http://%s:%s/v1/api/user", host, port),
+		cryptoKey: crypto.DeriveKey(cryptoKey),
 	}
 }
 
 func (c *Client) Register(login, password string) error {
-	a := fiber.Post(c.baseURL + "/register")
-	a.JSON(request.UserInput{Login: login, Password: password})
-
-	code, body, errs := a.Bytes()
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	if code == fiber.StatusConflict {
-		return fmt.Errorf("user already exists")
+	code, body, err := c.doPost(c.baseURL+"/register", "", request.UserInput{Login: login, Password: password})
+	if err != nil {
+		return err
 	}
 	if code != fiber.StatusOK {
-		return fmt.Errorf("register: %d %s", code, string(body))
+		return c.serverError(code, body)
 	}
 	return nil
 }
 
 func (c *Client) Login(login, password string) (string, error) {
-	a := fiber.Post(c.baseURL + "/login")
-	a.JSON(request.UserInput{Login: login, Password: password})
-
-	code, body, errs := a.Bytes()
-	if len(errs) > 0 {
-		return "", errs[0]
-	}
-	if code == fiber.StatusUnauthorized {
-		return "", fmt.Errorf("invalid credentials")
+	code, body, err := c.doPost(c.baseURL+"/login", "", request.UserInput{Login: login, Password: password})
+	if err != nil {
+		return "", err
 	}
 	if code != fiber.StatusOK {
-		return "", fmt.Errorf("login: %d %s", code, string(body))
+		return "", c.serverError(code, body)
 	}
 
 	var result struct {
@@ -61,18 +52,12 @@ func (c *Client) Login(login, password string) (string, error) {
 }
 
 func (c *Client) GetAllSecrets(token string) (*response.AllSecrets, error) {
-	a := fiber.Get(c.baseURL + "/secret/get-all-secrets")
-	a.Set("Authorization", "Bearer "+token)
-
-	code, body, errs := a.Bytes()
-	if len(errs) > 0 {
-		return nil, errs[0]
-	}
-	if code == fiber.StatusUnauthorized {
-		return nil, fmt.Errorf("session expired, please re-login")
+	code, body, err := c.doGet(c.baseURL+"/secret/get-all-secrets", token)
+	if err != nil {
+		return nil, err
 	}
 	if code != fiber.StatusOK {
-		return nil, fmt.Errorf("get secrets: %d %s", code, string(body))
+		return nil, c.serverError(code, body)
 	}
 
 	var secrets response.AllSecrets
@@ -83,71 +68,132 @@ func (c *Client) GetAllSecrets(token string) (*response.AllSecrets, error) {
 }
 
 func (c *Client) PostLoginPassword(token string, lp request.LoginPassword) error {
-	a := fiber.Post(c.baseURL + "/secret/post-login-password")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(lp)
-	return c.checkWrite(a)
+	return c.writeOp(c.baseURL+"/secret/post-login-password", token, lp)
 }
 
 func (c *Client) PostTextSecret(token string, ts request.TextSecret) error {
-	a := fiber.Post(c.baseURL + "/secret/post-text-secret")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(ts)
-	return c.checkWrite(a)
+	return c.writeOp(c.baseURL+"/secret/post-text-secret", token, ts)
 }
 
 func (c *Client) PostBinarySecret(token string, bs request.BinarySecret) error {
-	a := fiber.Post(c.baseURL + "/secret/post-binary-secret")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(bs)
-	return c.checkWrite(a)
+	return c.writeOp(c.baseURL+"/secret/post-binary-secret", token, bs)
 }
 
 func (c *Client) PostCardSecret(token string, cs request.CardSecret) error {
-	a := fiber.Post(c.baseURL + "/secret/post-card-secret")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(cs)
-	return c.checkWrite(a)
+	return c.writeOp(c.baseURL+"/secret/post-card-secret", token, cs)
 }
 
 func (c *Client) DeleteLoginPassword(token, login string) error {
-	a := fiber.Delete(c.baseURL + "/secret/delete-login-password")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(request.DeleteLoginPassword{Login: login})
-	return c.checkWrite(a)
+	return c.deleteOp(c.baseURL+"/secret/delete-login-password", token, request.DeleteLoginPassword{Login: login})
 }
 
 func (c *Client) DeleteTextSecret(token, title string) error {
-	a := fiber.Delete(c.baseURL + "/secret/delete-text-secret")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(request.DeleteTextSecret{Title: title})
-	return c.checkWrite(a)
+	return c.deleteOp(c.baseURL+"/secret/delete-text-secret", token, request.DeleteTextSecret{Title: title})
 }
 
 func (c *Client) DeleteBinarySecret(token, filename string) error {
-	a := fiber.Delete(c.baseURL + "/secret/delete-binary-secret")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(request.DeleteBinarySecret{Filename: filename})
-	return c.checkWrite(a)
+	return c.deleteOp(c.baseURL+"/secret/delete-binary-secret", token, request.DeleteBinarySecret{Filename: filename})
 }
 
 func (c *Client) DeleteCardSecret(token, cardholder string) error {
-	a := fiber.Delete(c.baseURL + "/secret/delete-card-secret")
-	a.Set("Authorization", "Bearer "+token)
-	a.JSON(request.DeleteCardSecret{Cardholder: cardholder})
-	return c.checkWrite(a)
+	return c.deleteOp(c.baseURL+"/secret/delete-card-secret", token, request.DeleteCardSecret{Cardholder: cardholder})
 }
 
-func (c *Client) checkWrite(a *fiber.Agent) error {
-	code, body, errs := a.Bytes()
+func (c *Client) serverError(code int, body []byte) error {
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &resp) == nil && resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return fmt.Errorf("server error %d", code)
+}
+
+func (c *Client) encryptBody(v any) ([]byte, error) {
+	j, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	enc, err := crypto.Encrypt(c.cryptoKey, j)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt: %w", err)
+	}
+	return enc, nil
+}
+
+func (c *Client) decryptBody(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return raw, nil
+	}
+	plain, err := crypto.Decrypt(c.cryptoKey, raw)
+	if err != nil {
+		return raw, nil
+	}
+	return plain, nil
+}
+
+func (c *Client) doPost(url, token string, body any) (int, []byte, error) {
+	enc, err := c.encryptBody(body)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	a := fiber.Post(url)
+	if token != "" {
+		a.Set("Authorization", "Bearer "+token)
+	}
+	a.ContentType(fiber.MIMEOctetStream)
+	a.Body(enc)
+
+	code, raw, errs := a.Bytes()
+	if len(errs) > 0 {
+		return 0, nil, errs[0]
+	}
+	plain, _ := c.decryptBody(raw)
+	return code, plain, nil
+}
+
+func (c *Client) doGet(url, token string) (int, []byte, error) {
+	a := fiber.Get(url)
+	a.Set("Authorization", "Bearer "+token)
+
+	code, raw, errs := a.Bytes()
+	if len(errs) > 0 {
+		return 0, nil, errs[0]
+	}
+	plain, _ := c.decryptBody(raw)
+	return code, plain, nil
+}
+
+func (c *Client) writeOp(url, token string, body any) error {
+	code, respBody, err := c.doPost(url, token, body)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return c.serverError(code, respBody)
+	}
+	return nil
+}
+
+func (c *Client) deleteOp(url, token string, body any) error {
+	enc, err := c.encryptBody(body)
+	if err != nil {
+		return err
+	}
+
+	a := fiber.Delete(url)
+	a.Set("Authorization", "Bearer "+token)
+	a.ContentType(fiber.MIMEOctetStream)
+	a.Body(enc)
+
+	code, raw, errs := a.Bytes()
 	if len(errs) > 0 {
 		return errs[0]
 	}
-	if code == fiber.StatusUnauthorized {
-		return fmt.Errorf("session expired, please re-login")
-	}
 	if code >= 400 {
-		return fmt.Errorf("server error %d: %s", code, string(body))
+		plain, _ := c.decryptBody(raw)
+		return c.serverError(code, plain)
 	}
 	return nil
 }

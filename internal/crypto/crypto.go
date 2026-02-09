@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 )
@@ -51,4 +52,24 @@ func Decrypt(key, ciphertext []byte) ([]byte, error) {
 
 	nonce, data := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	return gcm.Open(nil, nonce, data, nil)
+}
+
+func EncryptString(key []byte, plaintext string) (string, error) {
+	encrypted, err := Encrypt(key, []byte(plaintext))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(encrypted), nil
+}
+
+func DecryptString(key []byte, ciphertext string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(ciphertext)
+	if err != nil {
+		return "", err
+	}
+	decrypted, err := Decrypt(key, data)
+	if err != nil {
+		return "", err
+	}
+	return string(decrypted), nil
 }

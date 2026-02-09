@@ -18,8 +18,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	if cfg == nil {
+		return
+	}
 
-	client := clientconn.New(cfg.HTTP.Host, cfg.HTTP.Port)
+	client := clientconn.New(cfg.HTTP.Host, cfg.HTTP.Port, cfg.Crypto.Key)
 	cache := storage.NewCache(cfg.Crypto.Key)
 	cache.Load()
 
