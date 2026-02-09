@@ -25,7 +25,7 @@ type (
 
 	// HTTP -.
 	HTTP struct {
-		Host string `env:HTTP_HOST,required`
+		Host string `env:"HTTP_HOST,required"`
 		Port string `env:"HTTP_PORT,required"`
 	}
 
