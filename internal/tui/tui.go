@@ -1,3 +1,26 @@
+// Package tui implements the terminal user interface (TUI) for the
+// GophKeeper client using the Bubble Tea framework (Elm architecture).
+//
+// Architecture:
+//
+//	Model.Init()   → initial command (blink cursor)
+//	Model.Update() → process a message (key press, server response, error)
+//	Model.View()   → render the current screen to a string
+//
+// Screens:
+//
+//	screenAuth – login / register form
+//	screenMenu – main menu with available actions
+//	screenForm – dynamic form for creating or deleting a secret
+//	screenView – read-only table displaying all user secrets
+//
+// Navigation:
+//
+//	tab/shift-tab – switch between input fields
+//	enter         – submit the current form or select a menu item
+//	esc           – go back to the previous screen
+//	ctrl+r        – toggle register / login on the auth screen
+//	ctrl+c / q    – quit the application
 package tui
 
 import (
@@ -12,15 +35,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// screen identifies which view is currently displayed.
 type screen int
 
 const (
-	screenAuth screen = iota
-	screenMenu
-	screenForm
-	screenView
+	screenAuth screen = iota // login/register form
+	screenMenu               // main menu
+	screenForm               // create/delete form
+	screenView               // all-secrets table
 )
 
+// secretType identifies the secret kind that a form is targeting.
 type secretType int
 
 const (
@@ -34,6 +59,7 @@ const (
 	deleteCard
 )
 
+// menuAction identifies the action chosen from the main menu.
 type menuAction int
 
 const (
@@ -50,6 +76,7 @@ const (
 	actionExit
 )
 
+// menuItems defines the labels and actions shown in the main menu.
 var menuItems = []struct {
 	label  string
 	action menuAction
@@ -67,14 +94,21 @@ var menuItems = []struct {
 	{"Exit", actionExit},
 }
 
-// --- messages ---
+// --- Bubble Tea messages ---
 
+// tokenMsg is sent when login/register succeeds.
 type tokenMsg struct{ token string }
+
+// errMsg is sent when any async operation fails.
 type errMsg struct{ err error }
+
+// secretsMsg is sent when secrets are fetched from cache or server.
 type secretsMsg struct{ secrets *response.AllSecrets }
+
+// okMsg is sent on successful write/delete/cache-reset.
 type okMsg struct{ message string }
 
-// --- styles ---
+// --- lipgloss styles ---
 
 var (
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).MarginBottom(1)
@@ -88,36 +122,46 @@ var (
 	secItem       = lipgloss.NewStyle().PaddingLeft(2)
 )
 
-// --- model ---
+// --- Model ---
 
+// Model is the Bubble Tea model. It holds the entire UI state:
+// current screen, input fields, menu cursor position, loaded secrets,
+// status messages, and a reference to the business-logic UseCase.
 type Model struct {
 	screen screen
 	uc     *usecase.UseCase
 
+	// Auth screen
 	authInputs []textinput.Model
 	authFocus  int
-	register   bool
+	register   bool // true = register mode, false = login mode
 
+	// Menu screen
 	menuCursor int
 
+	// Form screen (create or delete secret)
 	formInputs []textinput.Model
 	formFocus  int
 	formTitle  string
 	formType   secretType
 
+	// View screen
 	secrets *response.AllSecrets
 
+	// Status bar
 	message   string
 	messageOk bool
 	loading   bool
 }
 
+// New creates the initial TUI model starting on the auth screen.
 func New(uc *usecase.UseCase) Model {
 	m := Model{screen: screenAuth, uc: uc}
 	m.initAuth()
 	return m
 }
 
+// initAuth prepares the login and password text inputs for the auth screen.
 func (m *Model) initAuth() {
 	login := textinput.New()
 	login.Placeholder = "login"
@@ -133,12 +177,14 @@ func (m *Model) initAuth() {
 	m.authFocus = 0
 }
 
+// Init returns the initial command (cursor blink).
 func (m Model) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-// --- commands ---
+// --- Async commands (run in a goroutine by Bubble Tea) ---
 
+// loginCmd sends login credentials to the server.
 func (m Model) loginCmd() tea.Cmd {
 	login, pass, uc := m.authInputs[0].Value(), m.authInputs[1].Value(), m.uc
 	return func() tea.Msg {
@@ -150,6 +196,7 @@ func (m Model) loginCmd() tea.Cmd {
 	}
 }
 
+// registerCmd registers a new account and logs in.
 func (m Model) registerCmd() tea.Cmd {
 	login, pass, uc := m.authInputs[0].Value(), m.authInputs[1].Value(), m.uc
 	return func() tea.Msg {
@@ -161,6 +208,7 @@ func (m Model) registerCmd() tea.Cmd {
 	}
 }
 
+// fetchSecretsCmd fetches all secrets (cache-first strategy).
 func (m Model) fetchSecretsCmd() tea.Cmd {
 	uc := m.uc
 	return func() tea.Msg {
@@ -172,6 +220,7 @@ func (m Model) fetchSecretsCmd() tea.Cmd {
 	}
 }
 
+// submitFormCmd sends the filled-in form data to the server.
 func (m Model) submitFormCmd() tea.Cmd {
 	ft := m.formType
 	vals := make([]string, len(m.formInputs))
@@ -216,6 +265,7 @@ func (m Model) submitFormCmd() tea.Cmd {
 	}
 }
 
+// resetCacheCmd clears the local encrypted cache.
 func (m Model) resetCacheCmd() tea.Cmd {
 	uc := m.uc
 	return func() tea.Msg {
@@ -224,8 +274,9 @@ func (m Model) resetCacheCmd() tea.Cmd {
 	}
 }
 
-// --- update ---
+// --- Update (message handler) ---
 
+// Update processes Bubble Tea messages and returns an updated model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -270,6 +321,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateAuth handles key presses on the login/register screen.
 func (m Model) updateAuth(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.loading {
 		return m, nil
@@ -313,6 +365,7 @@ func (m Model) updateAuth(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// updateMenu handles key presses on the main menu.
 func (m Model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.Type {
@@ -334,6 +387,8 @@ func (m Model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleMenuAction dispatches the selected menu item to the
+// corresponding screen or command.
 func (m Model) handleMenuAction(action menuAction) (tea.Model, tea.Cmd) {
 	m.message = ""
 	switch action {
@@ -372,6 +427,8 @@ func (m Model) handleMenuAction(action menuAction) (tea.Model, tea.Cmd) {
 	return m, textinput.Blink
 }
 
+// setupForm initialises the form screen with the given title,
+// secret type and placeholder labels for each input field.
 func (m *Model) setupForm(title string, ft secretType, placeholders []string) {
 	m.formTitle = title
 	m.formType = ft
@@ -389,6 +446,7 @@ func (m *Model) setupForm(title string, ft secretType, placeholders []string) {
 	m.screen = screenForm
 }
 
+// updateForm handles key presses on the create/delete form.
 func (m Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.loading {
 		return m, nil
@@ -441,6 +499,7 @@ func (m Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// updateView handles key presses on the read-only secrets view.
 func (m Model) updateView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok {
 		if key.Type == tea.KeyEsc {
@@ -451,8 +510,9 @@ func (m Model) updateView(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// --- view ---
+// --- View (render) ---
 
+// View renders the current screen to a string.
 func (m Model) View() string {
 	if m.loading {
 		return "\n  Loading...\n"
@@ -484,6 +544,7 @@ func (m Model) View() string {
 	return s.String()
 }
 
+// viewAuth renders the login/register screen.
 func (m Model) viewAuth() string {
 	var s strings.Builder
 	mode := "Login"
@@ -506,6 +567,7 @@ func (m Model) viewAuth() string {
 	return s.String()
 }
 
+// viewMenu renders the main menu with a cursor indicator.
 func (m Model) viewMenu() string {
 	var s strings.Builder
 	s.WriteString(titleStyle.Render("  GophKeeper  -  Menu"))
@@ -525,6 +587,7 @@ func (m Model) viewMenu() string {
 	return s.String()
 }
 
+// viewForm renders the dynamic create/delete form.
 func (m Model) viewForm() string {
 	var s strings.Builder
 	s.WriteString(titleStyle.Render(fmt.Sprintf("  %s", m.formTitle)))
@@ -543,6 +606,7 @@ func (m Model) viewForm() string {
 	return s.String()
 }
 
+// viewSecrets renders the read-only list of all user secrets.
 func (m Model) viewSecrets() string {
 	var s strings.Builder
 	s.WriteString(titleStyle.Render("  All Secrets"))
