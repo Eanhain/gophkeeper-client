@@ -3,17 +3,15 @@ package usecase
 import (
 	"github.com/Eanhain/gophkeeper-client/contracts/request"
 	"github.com/Eanhain/gophkeeper-client/contracts/response"
-	clientconn "github.com/Eanhain/gophkeeper-client/internal/clientConn"
-	"github.com/Eanhain/gophkeeper-client/internal/storage"
 )
 
 type UseCase struct {
-	client *clientconn.Client
-	cache  *storage.Cache
+	client HTTPClient
+	cache  SecretCache
 	token  string
 }
 
-func New(client *clientconn.Client, cache *storage.Cache) *UseCase {
+func New(client HTTPClient, cache SecretCache) *UseCase {
 	return &UseCase{client: client, cache: cache}
 }
 
