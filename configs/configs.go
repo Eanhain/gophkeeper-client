@@ -52,7 +52,7 @@ type (
 	// HTTP traffic is not encrypted by the client; the server handles
 	// per-user encryption with Argon2-derived keys.
 	Crypto struct {
-		Key string `env:"CRYPTO_KEY","required"`
+		Key string `env:"CRYPTO_KEY,required"`
 	}
 )
 
