@@ -7,17 +7,18 @@ import (
 
 // UseCase orchestrates client-side operations.
 //
-// Read path:  cache hit → return cached data.
+// Read path:  try server → cache result → return.
 //
-//	cache miss → fetch from server → store in cache → return.
+//	If server unavailable → return from cache (offline mode).
 //
 // Write path: send to server → invalidate cache (Reset).
 //
-// This cache-first strategy minimises network traffic while the
-// cache-invalidation-on-write approach keeps data consistent.
+//	If server unavailable → return error (writes require server).
+//
+// This strategy provides offline read access while keeping writes consistent.
 type UseCase struct {
 	client HTTPClient  // talks to the GophKeeper server
-	cache  SecretCache // encrypted local cache
+	cache  SecretCache // encrypted local cache (SQLite)
 	token  string      // JWT token received after login/register
 }
 
@@ -37,29 +38,87 @@ func (uc *UseCase) Login(login, password string) (string, error) {
 	return uc.client.Login(login, password)
 }
 
-// Register creates a new account and immediately logs in,
-// returning a JWT token on success.
+// Register creates a new account and returns a JWT token on success.
 func (uc *UseCase) Register(login, password string) (string, error) {
-	if err := uc.client.Register(login, password); err != nil {
-		return "", err
-	}
-	return uc.client.Login(login, password)
+	return uc.client.Register(login, password)
 }
 
-// GetAllSecrets returns secrets from cache if available,
-// otherwise fetches them from the server and populates the cache.
+// GetCachedSecrets returns whatever is in the local cache without
+// contacting the server. Returns nil if the cache is empty.
+func (uc *UseCase) GetCachedSecrets() *response.AllSecrets {
+	return uc.cache.Get()
+}
+
+// GetAllSecrets tries to fetch secrets from the server.
+// On success, the result is cached locally. On network failure,
+// the cached version is returned (offline mode).
 func (uc *UseCase) GetAllSecrets() (*response.AllSecrets, error) {
+	secrets, err := uc.client.GetAllSecrets(uc.token)
+	if err == nil {
+		_ = uc.cache.Set(secrets)
+		return secrets, nil
+	}
+
+	// Server unavailable — fall back to cache (offline mode).
 	if cached := uc.cache.Get(); cached != nil {
 		return cached, nil
 	}
 
-	secrets, err := uc.client.GetAllSecrets(uc.token)
-	if err != nil {
-		return nil, err
-	}
+	// No cache either — return the original error.
+	return nil, err
+}
 
-	uc.cache.Set(secrets)
-	return secrets, nil
+// GetLoginPasswords fetches login-password secrets from the server.
+// Falls back to the cached version on network failure.
+func (uc *UseCase) GetLoginPasswords() ([]response.LoginPassword, error) {
+	result, err := uc.client.GetLoginPasswords(uc.token)
+	if err == nil {
+		return result, nil
+	}
+	// Offline fallback.
+	if cached := uc.cache.Get(); cached != nil {
+		return cached.LoginPassword, nil
+	}
+	return nil, err
+}
+
+// GetTextSecrets fetches text secrets from the server.
+// Falls back to the cached version on network failure.
+func (uc *UseCase) GetTextSecrets() ([]response.TextSecret, error) {
+	result, err := uc.client.GetTextSecrets(uc.token)
+	if err == nil {
+		return result, nil
+	}
+	if cached := uc.cache.Get(); cached != nil {
+		return cached.TextSecret, nil
+	}
+	return nil, err
+}
+
+// GetBinarySecrets fetches binary secrets from the server.
+// Falls back to the cached version on network failure.
+func (uc *UseCase) GetBinarySecrets() ([]response.BinarySecret, error) {
+	result, err := uc.client.GetBinarySecrets(uc.token)
+	if err == nil {
+		return result, nil
+	}
+	if cached := uc.cache.Get(); cached != nil {
+		return cached.BinarySecret, nil
+	}
+	return nil, err
+}
+
+// GetCardSecrets fetches card secrets from the server.
+// Falls back to the cached version on network failure.
+func (uc *UseCase) GetCardSecrets() ([]response.CardSecret, error) {
+	result, err := uc.client.GetCardSecrets(uc.token)
+	if err == nil {
+		return result, nil
+	}
+	if cached := uc.cache.Get(); cached != nil {
+		return cached.CardSecret, nil
+	}
+	return nil, err
 }
 
 // AddLoginPassword sends a new login-password to the server
@@ -139,4 +198,10 @@ func (uc *UseCase) DeleteCardSecret(cardholder string) error {
 // Useful when a secret was changed by another client.
 func (uc *UseCase) ResetCache() {
 	uc.cache.Reset()
+}
+
+// IsWrongKey returns true if the local cache has data but the CRYPTO_KEY
+// is incorrect (decryption failed during Load).
+func (uc *UseCase) IsWrongKey() bool {
+	return uc.cache.WrongKey()
 }

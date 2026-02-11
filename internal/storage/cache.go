@@ -1,68 +1,98 @@
-// Package storage provides an encrypted file-based cache for user secrets.
+// Package storage provides an encrypted SQLite-based cache for user secrets.
 //
-// The cache stores a JSON-serialised [response.AllSecrets] blob encrypted
-// with AES-256-GCM into the file ".gophkeeper_cache.enc" in the working
-// directory. This allows the client to serve read requests locally without
-// contacting the server.
+// The cache stores secrets in a local SQLite database file. Sensitive fields
+// (passwords, PAN, text bodies, binary data) are encrypted with AES-256-GCM
+// using a local passphrase (CRYPTO_KEY). This allows the client to serve
+// read requests locally when the server is unavailable (offline mode).
 //
 // Invalidation strategy: every write/delete operation calls Reset(), which
-// removes the in-memory state and deletes the disk file. The next read
-// triggers a fresh fetch from the server.
+// clears all cached data. The next read triggers a fresh fetch from the server.
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"sync"
 
 	"github.com/Eanhain/gophkeeper-client/contracts/response"
 	"github.com/Eanhain/gophkeeper-client/internal/crypto"
+
+	_ "modernc.org/sqlite"
 )
 
-// cacheFile is the name of the encrypted cache file on disk.
-const cacheFile = ".gophkeeper_cache.enc"
+const dbFile = ".gophkeeper_cache.db"
 
-// Cache is a thread-safe encrypted secret store.
+// Cache is a thread-safe encrypted SQLite secret store.
 // It implements the usecase.SecretCache interface.
 type Cache struct {
-	mu      sync.RWMutex
-	key     []byte               // AES-256 key derived from the passphrase
-	secrets *response.AllSecrets  // nil means "empty / stale"
+	mu       sync.RWMutex
+	key      []byte // AES-256 key derived from the passphrase
+	db       *sql.DB
+	secrets  *response.AllSecrets // in-memory cache
+	wrongKey bool                 // true if data exists but decryption failed
 }
 
 // NewCache creates a new Cache with the given passphrase.
-// Call Load() after creation to restore previously cached data from disk.
+// Call Load() after creation to open the database and restore cached data.
 func NewCache(cryptoKey string) *Cache {
 	return &Cache{
 		key: crypto.DeriveKey(cryptoKey),
 	}
 }
 
-// Load reads the encrypted cache file from disk and populates
-// the in-memory state. Returns nil (no error) if the file does not exist —
-// the cache simply stays empty. Returns an error if the file exists but
-// cannot be decrypted (e.g. wrong key).
+// Load opens (or creates) the SQLite database and restores any
+// previously cached secrets into memory. Returns nil if the database
+// does not exist — the cache simply stays empty.
 func (c *Cache) Load() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	data, err := os.ReadFile(cacheFile)
+	db, err := sql.Open("sqlite", dbFile)
 	if err != nil {
+		return err
+	}
+	c.db = db
+
+	// Create the cache table if it doesn't exist.
+	_, err = c.db.Exec(`CREATE TABLE IF NOT EXISTS cache (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		data BLOB NOT NULL
+	)`)
+	if err != nil {
+		return err
+	}
+
+	// Try to load existing data.
+	var encData []byte
+	err = c.db.QueryRow("SELECT data FROM cache WHERE id = 1").Scan(&encData)
+	if err != nil {
+		// No cached data — that's fine.
 		return nil
 	}
 
-	plain, err := crypto.Decrypt(c.key, data)
+	plain, err := crypto.Decrypt(c.key, encData)
 	if err != nil {
-		return err
+		// Data exists but decryption failed — wrong key.
+		c.wrongKey = true
+		return nil
 	}
 
 	var secrets response.AllSecrets
 	if err := json.Unmarshal(plain, &secrets); err != nil {
-		return err
+		return nil
 	}
 
 	c.secrets = &secrets
 	return nil
+}
+
+// WrongKey returns true if the database contains cached data but
+// decryption failed during Load() — meaning the CRYPTO_KEY is incorrect.
+func (c *Cache) WrongKey() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.wrongKey
 }
 
 // Get returns the cached secrets or nil if the cache is empty.
@@ -72,29 +102,55 @@ func (c *Cache) Get() *response.AllSecrets {
 	return c.secrets
 }
 
-// Set updates both the in-memory cache and the encrypted disk file.
+// Set updates both the in-memory cache and the SQLite database.
 func (c *Cache) Set(secrets *response.AllSecrets) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.secrets = secrets
-	return c.saveToDisk()
+	return c.saveToDB()
 }
 
-// Reset clears the in-memory cache and removes the disk file.
-// This forces the next GetAllSecrets call to fetch fresh data from the server.
+// Reset clears the in-memory cache and removes all data from the SQLite database.
+// This forces the next read to fetch fresh data from the server.
 func (c *Cache) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.secrets = nil
-	os.Remove(cacheFile)
+	if c.db != nil {
+		c.db.Exec("DELETE FROM cache") //nolint:errcheck
+	}
 }
 
-// saveToDisk serialises the secrets to JSON, encrypts the result and writes
-// it to disk with mode 0600 (owner read/write only).
-func (c *Cache) saveToDisk() error {
-	if c.secrets == nil {
+// Close closes the underlying SQLite database connection.
+func (c *Cache) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db != nil {
+		return c.db.Close()
+	}
+	return nil
+}
+
+// Remove deletes the SQLite database file from disk.
+func (c *Cache) Remove() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db != nil {
+		c.db.Close()
+		c.db = nil
+	}
+	c.secrets = nil
+	os.Remove(dbFile)
+}
+
+// saveToDB serialises the secrets to JSON, encrypts the result and writes
+// it to the SQLite database using UPSERT.
+func (c *Cache) saveToDB() error {
+	if c.secrets == nil || c.db == nil {
 		return nil
 	}
 
@@ -108,5 +164,9 @@ func (c *Cache) saveToDisk() error {
 		return err
 	}
 
-	return os.WriteFile(cacheFile, encrypted, 0600)
+	_, err = c.db.Exec(
+		"INSERT INTO cache (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = ?",
+		encrypted, encrypted,
+	)
+	return err
 }

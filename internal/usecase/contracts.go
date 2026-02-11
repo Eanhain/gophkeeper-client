@@ -12,12 +12,15 @@ import (
 )
 
 // HTTPClient abstracts all REST API calls to the GophKeeper server.
-// The concrete implementation lives in the clientconn package and uses
-// Fiber's HTTP client with AES-256-GCM body encryption.
+// The concrete implementation lives in the clientconn package.
 type HTTPClient interface {
-	Register(login, password string) error
+	Register(login, password string) (string, error)
 	Login(login, password string) (string, error)
 	GetAllSecrets(token string) (*response.AllSecrets, error)
+	GetLoginPasswords(token string) ([]response.LoginPassword, error)
+	GetTextSecrets(token string) ([]response.TextSecret, error)
+	GetBinarySecrets(token string) ([]response.BinarySecret, error)
+	GetCardSecrets(token string) ([]response.CardSecret, error)
 	PostLoginPassword(token string, lp request.LoginPassword) error
 	PostTextSecret(token string, ts request.TextSecret) error
 	PostBinarySecret(token string, bs request.BinarySecret) error
@@ -28,7 +31,7 @@ type HTTPClient interface {
 	DeleteCardSecret(token, cardholder string) error
 }
 
-// SecretCache abstracts the encrypted local cache.
+// SecretCache abstracts the encrypted local cache (SQLite-backed).
 // Get returns nil when the cache is empty or stale.
 // Write operations (Add*, Delete*) call Reset() to invalidate the cache
 // so that the next read fetches fresh data from the server.
@@ -36,4 +39,7 @@ type SecretCache interface {
 	Get() *response.AllSecrets
 	Set(secrets *response.AllSecrets) error
 	Reset()
+	Load() error
+	Close() error
+	WrongKey() bool
 }

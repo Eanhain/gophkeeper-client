@@ -76,22 +76,41 @@ const (
 	actionExit
 )
 
+// menuItem describes a single entry in the main menu.
+type menuItem struct {
+	label    string
+	action   menuAction
+	needsNet bool // true = hidden in offline mode
+}
+
 // menuItems defines the labels and actions shown in the main menu.
-var menuItems = []struct {
-	label  string
-	action menuAction
-}{
-	{"View All Secrets", actionViewAll},
-	{"Add Login/Password", actionAddLP},
-	{"Add Text Secret", actionAddText},
-	{"Add Binary Secret", actionAddBinary},
-	{"Add Card Secret", actionAddCard},
-	{"Delete Login/Password", actionDeleteLP},
-	{"Delete Text Secret", actionDeleteText},
-	{"Delete Binary Secret", actionDeleteBinary},
-	{"Delete Card Secret", actionDeleteCard},
-	{"Reset Cache", actionResetCache},
-	{"Exit", actionExit},
+var menuItems = []menuItem{
+	{"View All Secrets", actionViewAll, false},
+	{"Add Login/Password", actionAddLP, true},
+	{"Add Text Secret", actionAddText, true},
+	{"Add Binary Secret", actionAddBinary, true},
+	{"Add Card Secret", actionAddCard, true},
+	{"Delete Login/Password", actionDeleteLP, true},
+	{"Delete Text Secret", actionDeleteText, true},
+	{"Delete Binary Secret", actionDeleteBinary, true},
+	{"Delete Card Secret", actionDeleteCard, true},
+	{"Reset Cache", actionResetCache, false},
+	{"Exit", actionExit, false},
+}
+
+// visibleMenuItems returns menu items available in the current mode.
+// In offline mode, items requiring network (add/delete) are hidden.
+func visibleMenu(offline bool) []menuItem {
+	if !offline {
+		return menuItems
+	}
+	var items []menuItem
+	for _, it := range menuItems {
+		if !it.needsNet {
+			items = append(items, it)
+		}
+	}
+	return items
 }
 
 // --- Bubble Tea messages ---
@@ -107,6 +126,12 @@ type secretsMsg struct{ secrets *response.AllSecrets }
 
 // okMsg is sent on successful write/delete/cache-reset.
 type okMsg struct{ message string }
+
+// offlineOkMsg is sent when the cache has data for offline mode.
+type offlineOkMsg struct{ secrets *response.AllSecrets }
+
+// offlineFailMsg is sent when offline mode cannot be entered.
+type offlineFailMsg struct{ reason string }
 
 // --- lipgloss styles ---
 
@@ -152,6 +177,9 @@ type Model struct {
 	message   string
 	messageOk bool
 	loading   bool
+
+	// Offline mode (read-only, from cache)
+	offline bool
 }
 
 // New creates the initial TUI model starting on the auth screen.
@@ -265,6 +293,22 @@ func (m Model) submitFormCmd() tea.Cmd {
 	}
 }
 
+// tryOfflineCmd checks whether the local cache contains data.
+// If yes, sends offlineOkMsg; if wrong key, sends offlineFailMsg with
+// an appropriate message; otherwise reports empty cache.
+func (m Model) tryOfflineCmd() tea.Cmd {
+	uc := m.uc
+	return func() tea.Msg {
+		if uc.IsWrongKey() {
+			return offlineFailMsg{reason: "Wrong CRYPTO_KEY — cannot decrypt local cache"}
+		}
+		if cached := uc.GetCachedSecrets(); cached != nil {
+			return offlineOkMsg{cached}
+		}
+		return offlineFailMsg{reason: "Cache is empty — offline mode unavailable"}
+	}
+}
+
 // resetCacheCmd clears the local encrypted cache.
 func (m Model) resetCacheCmd() tea.Cmd {
 	uc := m.uc
@@ -304,6 +348,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = msg.message
 		m.messageOk = true
 		m.screen = screenMenu
+		m.loading = false
+		return m, nil
+	case offlineOkMsg:
+		m.offline = true
+		m.screen = screenMenu
+		m.menuCursor = 0
+		m.message = "Offline mode (read-only, from cache)"
+		m.messageOk = true
+		m.loading = false
+		return m, nil
+	case offlineFailMsg:
+		m.message = msg.reason
+		m.messageOk = false
 		m.loading = false
 		return m, nil
 	}
@@ -353,6 +410,10 @@ func (m Model) updateAuth(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlR:
 			m.register = !m.register
 			return m, nil
+		case tea.KeyCtrlO:
+			m.loading = true
+			m.message = ""
+			return m, m.tryOfflineCmd()
 		}
 	}
 
@@ -367,6 +428,7 @@ func (m Model) updateAuth(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateMenu handles key presses on the main menu.
 func (m Model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
+	items := visibleMenu(m.offline)
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.Type {
 		case tea.KeyUp:
@@ -374,11 +436,11 @@ func (m Model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.menuCursor--
 			}
 		case tea.KeyDown:
-			if m.menuCursor < len(menuItems)-1 {
+			if m.menuCursor < len(items)-1 {
 				m.menuCursor++
 			}
 		case tea.KeyEnter:
-			return m.handleMenuAction(menuItems[m.menuCursor].action)
+			return m.handleMenuAction(items[m.menuCursor].action)
 		}
 		if key.String() == "q" {
 			return m, tea.Quit
@@ -563,16 +625,21 @@ func (m Model) viewAuth() string {
 		s.WriteString("\n")
 	}
 	s.WriteString("\n")
-	s.WriteString(helpStyle.Render("  enter: submit | tab: switch field | ctrl+r: toggle register/login | ctrl+c: quit"))
+	s.WriteString(helpStyle.Render("  enter: submit | tab: switch field | ctrl+r: toggle register/login | ctrl+o: offline | ctrl+c: quit"))
 	return s.String()
 }
 
 // viewMenu renders the main menu with a cursor indicator.
 func (m Model) viewMenu() string {
+	items := visibleMenu(m.offline)
 	var s strings.Builder
-	s.WriteString(titleStyle.Render("  GophKeeper  -  Menu"))
+	title := "  GophKeeper  -  Menu"
+	if m.offline {
+		title = "  GophKeeper  -  Menu (offline, read-only)"
+	}
+	s.WriteString(titleStyle.Render(title))
 	s.WriteString("\n\n")
-	for i, item := range menuItems {
+	for i, item := range items {
 		cursor := "  "
 		style := normalStyle
 		if i == m.menuCursor {

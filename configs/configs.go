@@ -48,15 +48,11 @@ type (
 		Enabled bool `env:"SWAGGER_ENABLED" envDefault:"false"`
 	}
 
-	// JWT is not used by the client directly; the token is received from the server.
-	JWT struct {
-		Secret string `env:"JWT_SECRET" envDefault:"supersecret"`
-	}
-
-	// Crypto holds the symmetric key used both for local cache encryption
-	// and for encrypting HTTP bodies sent to/from the server.
+	// Crypto holds the symmetric key used for local cache encryption.
+	// HTTP traffic is not encrypted by the client; the server handles
+	// per-user encryption with Argon2-derived keys.
 	Crypto struct {
-		Key string `env:"CRYPTO_KEY" envDefault:"change-me"`
+		Key string `env:"CRYPTO_KEY","required"`
 	}
 )
 
@@ -76,7 +72,7 @@ func NewConfig() (*Config, error) {
 	host := flag.String("host", cfg.HTTP.Host, "server host")
 	port := flag.String("port", cfg.HTTP.Port, "server port")
 	logLevel := flag.String("log", cfg.Log.Level, "log level")
-	cryptoKey := flag.String("crypto-key", cfg.Crypto.Key, "encryption key")
+	cryptoKey := flag.String("crypto-key", cfg.Crypto.Key, "local cache encryption key")
 	ver := flag.Bool("v", false, "print version and exit")
 	flag.Parse()
 

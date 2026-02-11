@@ -1,54 +1,64 @@
 // Package clientconn implements the HTTP client that communicates with
 // the GophKeeper server using Fiber's built-in HTTP agent.
 //
-// All request bodies are encrypted with AES-256-GCM before being sent,
-// and all response bodies are decrypted upon receipt. The same symmetric
-// key is used on both sides (client and server CryptoMiddleware).
+// Transport security is handled by TLS; data-at-rest encryption is
+// per-user on the server side (AES-256-GCM with Argon2-derived keys).
 //
-// The package exposes a single [Client] struct that satisfies the
-// usecase.HTTPClient interface.
+// The client includes retry logic with exponential backoff for resilience
+// against transient network failures.
 package clientconn
 
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"time"
 
 	"github.com/Eanhain/gophkeeper-client/contracts/request"
 	"github.com/Eanhain/gophkeeper-client/contracts/response"
-	"github.com/Eanhain/gophkeeper-client/internal/crypto"
 	"github.com/gofiber/fiber/v2"
+)
+
+const (
+	maxRetries    = 3
+	baseDelay     = 500 * time.Millisecond
+	maxDelay      = 5 * time.Second
+	requestTimeout = 10 * time.Second
 )
 
 // Client is a Fiber-based HTTP client for the GophKeeper REST API.
 type Client struct {
-	baseURL   string // e.g. "http://127.0.0.1:8080/v1/api/user"
-	cryptoKey []byte // 32-byte AES key derived from the passphrase
+	baseURL string // e.g. "http://127.0.0.1:8080/v1/api/user"
 }
 
 // New creates a Client pointing at the given host:port.
-// The cryptoKey string is hashed with SHA-256 to produce a 32-byte AES key.
-func New(host, port, cryptoKey string) *Client {
+func New(host, port string) *Client {
 	return &Client{
-		baseURL:   fmt.Sprintf("http://%s:%s/v1/api/user", host, port),
-		cryptoKey: crypto.DeriveKey(cryptoKey),
+		baseURL: fmt.Sprintf("http://%s:%s/v1/api/user", host, port),
 	}
 }
 
 // Register creates a new user account on the server.
-func (c *Client) Register(login, password string) error {
-	code, body, err := c.doPost(c.baseURL+"/register", "", request.UserInput{Login: login, Password: password})
+func (c *Client) Register(login, password string) (string, error) {
+	code, body, err := c.doPostWithRetry(c.baseURL+"/register", "", request.UserInput{Login: login, Password: password})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if code != fiber.StatusOK {
-		return c.serverError(code, body)
+		return "", c.serverError(code, body)
 	}
-	return nil
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parse token: %w", err)
+	}
+	return result.Token, nil
 }
 
 // Login authenticates and returns a JWT token string.
 func (c *Client) Login(login, password string) (string, error) {
-	code, body, err := c.doPost(c.baseURL+"/login", "", request.UserInput{Login: login, Password: password})
+	code, body, err := c.doPostWithRetry(c.baseURL+"/login", "", request.UserInput{Login: login, Password: password})
 	if err != nil {
 		return "", err
 	}
@@ -67,7 +77,7 @@ func (c *Client) Login(login, password string) (string, error) {
 
 // GetAllSecrets fetches every secret owned by the authenticated user.
 func (c *Client) GetAllSecrets(token string) (*response.AllSecrets, error) {
-	code, body, err := c.doGet(c.baseURL+"/secret/get-all-secrets", token)
+	code, body, err := c.doGetWithRetry(c.baseURL+"/secret/get-all-secrets", token)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +90,70 @@ func (c *Client) GetAllSecrets(token string) (*response.AllSecrets, error) {
 		return nil, fmt.Errorf("parse secrets: %w", err)
 	}
 	return &secrets, nil
+}
+
+// GetLoginPasswords fetches all login-password secrets.
+func (c *Client) GetLoginPasswords(token string) ([]response.LoginPassword, error) {
+	code, body, err := c.doGetWithRetry(c.baseURL+"/secret/get-login-password", token)
+	if err != nil {
+		return nil, err
+	}
+	if code != fiber.StatusOK {
+		return nil, c.serverError(code, body)
+	}
+	var result []response.LoginPassword
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse login-passwords: %w", err)
+	}
+	return result, nil
+}
+
+// GetTextSecrets fetches all text secrets.
+func (c *Client) GetTextSecrets(token string) ([]response.TextSecret, error) {
+	code, body, err := c.doGetWithRetry(c.baseURL+"/secret/get-text-secret", token)
+	if err != nil {
+		return nil, err
+	}
+	if code != fiber.StatusOK {
+		return nil, c.serverError(code, body)
+	}
+	var result []response.TextSecret
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse text-secrets: %w", err)
+	}
+	return result, nil
+}
+
+// GetBinarySecrets fetches all binary secrets.
+func (c *Client) GetBinarySecrets(token string) ([]response.BinarySecret, error) {
+	code, body, err := c.doGetWithRetry(c.baseURL+"/secret/get-binary-secret", token)
+	if err != nil {
+		return nil, err
+	}
+	if code != fiber.StatusOK {
+		return nil, c.serverError(code, body)
+	}
+	var result []response.BinarySecret
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse binary-secrets: %w", err)
+	}
+	return result, nil
+}
+
+// GetCardSecrets fetches all card secrets.
+func (c *Client) GetCardSecrets(token string) ([]response.CardSecret, error) {
+	code, body, err := c.doGetWithRetry(c.baseURL+"/secret/get-card-secret", token)
+	if err != nil {
+		return nil, err
+	}
+	if code != fiber.StatusOK {
+		return nil, c.serverError(code, body)
+	}
+	var result []response.CardSecret
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse card-secrets: %w", err)
+	}
+	return result, nil
 }
 
 // PostLoginPassword creates a login-password secret on the server.
@@ -125,8 +199,7 @@ func (c *Client) DeleteCardSecret(token, cardholder string) error {
 // --- internal helpers ---
 
 // serverError tries to extract an {"error":"..."} message from the
-// decrypted response body. If parsing fails, returns a generic error
-// with the HTTP status code.
+// response body. If parsing fails, returns a generic error with the HTTP status code.
 func (c *Client) serverError(code int, body []byte) error {
 	var resp struct {
 		Error string `json:"error"`
@@ -137,73 +210,92 @@ func (c *Client) serverError(code int, body []byte) error {
 	return fmt.Errorf("server error %d", code)
 }
 
-// encryptBody JSON-marshals v and encrypts the result with AES-256-GCM.
-func (c *Client) encryptBody(v any) ([]byte, error) {
-	j, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+// retryDelay calculates exponential backoff delay with a cap.
+func retryDelay(attempt int) time.Duration {
+	delay := time.Duration(float64(baseDelay) * math.Pow(2, float64(attempt)))
+	if delay > maxDelay {
+		delay = maxDelay
 	}
-	enc, err := crypto.Encrypt(c.cryptoKey, j)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt: %w", err)
-	}
-	return enc, nil
+	return delay
 }
 
-// decryptBody decrypts the raw server response. If decryption fails
-// (e.g. the response is not encrypted), the raw bytes are returned as-is
-// to allow the caller to handle plaintext error messages.
-func (c *Client) decryptBody(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		return raw, nil
-	}
-	plain, err := crypto.Decrypt(c.cryptoKey, raw)
-	if err != nil {
-		return raw, nil
-	}
-	return plain, nil
+// isRetryable returns true if the error is a transient network error.
+func isRetryable(errs []error) bool {
+	return len(errs) > 0
 }
 
-// doPost sends an encrypted POST request.
+// doPost sends a JSON POST request.
 // If token is non-empty, an Authorization: Bearer header is added.
 func (c *Client) doPost(url, token string, body any) (int, []byte, error) {
-	enc, err := c.encryptBody(body)
+	j, err := json.Marshal(body)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("marshal: %w", err)
 	}
 
 	a := fiber.Post(url)
 	if token != "" {
 		a.Set("Authorization", "Bearer "+token)
 	}
-	a.ContentType(fiber.MIMEOctetStream)
-	a.Body(enc)
+	a.ContentType(fiber.MIMEApplicationJSON)
+	a.Body(j)
+	a.Timeout(requestTimeout)
 
 	code, raw, errs := a.Bytes()
 	if len(errs) > 0 {
 		return 0, nil, errs[0]
 	}
-	plain, _ := c.decryptBody(raw)
-	return code, plain, nil
+	return code, raw, nil
 }
 
-// doGet sends a GET request (no body) and decrypts the response.
+// doPostWithRetry sends a JSON POST with retry on network errors.
+func (c *Client) doPostWithRetry(url, token string, body any) (int, []byte, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		code, raw, err := c.doPost(url, token, body)
+		if err == nil {
+			return code, raw, nil
+		}
+		lastErr = err
+		if attempt < maxRetries {
+			time.Sleep(retryDelay(attempt))
+		}
+	}
+	return 0, nil, fmt.Errorf("after %d retries: %w", maxRetries+1, lastErr)
+}
+
+// doGet sends a GET request (no body).
 func (c *Client) doGet(url, token string) (int, []byte, error) {
 	a := fiber.Get(url)
 	a.Set("Authorization", "Bearer "+token)
+	a.Timeout(requestTimeout)
 
 	code, raw, errs := a.Bytes()
 	if len(errs) > 0 {
 		return 0, nil, errs[0]
 	}
-	plain, _ := c.decryptBody(raw)
-	return code, plain, nil
+	return code, raw, nil
+}
+
+// doGetWithRetry sends a GET with retry on network errors.
+func (c *Client) doGetWithRetry(url, token string) (int, []byte, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		code, raw, err := c.doGet(url, token)
+		if err == nil {
+			return code, raw, nil
+		}
+		lastErr = err
+		if attempt < maxRetries {
+			time.Sleep(retryDelay(attempt))
+		}
+	}
+	return 0, nil, fmt.Errorf("after %d retries: %w", maxRetries+1, lastErr)
 }
 
 // writeOp is a shorthand for POST endpoints that return only a status
 // message (no data to parse beyond error checking).
 func (c *Client) writeOp(url, token string, body any) error {
-	code, respBody, err := c.doPost(url, token, body)
+	code, respBody, err := c.doPostWithRetry(url, token, body)
 	if err != nil {
 		return err
 	}
@@ -216,23 +308,31 @@ func (c *Client) writeOp(url, token string, body any) error {
 // deleteOp is a shorthand for DELETE endpoints that carry a JSON body
 // identifying the resource to remove.
 func (c *Client) deleteOp(url, token string, body any) error {
-	enc, err := c.encryptBody(body)
+	j, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal: %w", err)
 	}
 
-	a := fiber.Delete(url)
-	a.Set("Authorization", "Bearer "+token)
-	a.ContentType(fiber.MIMEOctetStream)
-	a.Body(enc)
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		a := fiber.Delete(url)
+		a.Set("Authorization", "Bearer "+token)
+		a.ContentType(fiber.MIMEApplicationJSON)
+		a.Body(j)
+		a.Timeout(requestTimeout)
 
-	code, raw, errs := a.Bytes()
-	if len(errs) > 0 {
-		return errs[0]
+		code, raw, errs := a.Bytes()
+		if isRetryable(errs) {
+			lastErr = errs[0]
+			if attempt < maxRetries {
+				time.Sleep(retryDelay(attempt))
+			}
+			continue
+		}
+		if code >= 400 {
+			return c.serverError(code, raw)
+		}
+		return nil
 	}
-	if code >= 400 {
-		plain, _ := c.decryptBody(raw)
-		return c.serverError(code, plain)
-	}
-	return nil
+	return fmt.Errorf("after %d retries: %w", maxRetries+1, lastErr)
 }

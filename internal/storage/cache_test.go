@@ -1,118 +1,127 @@
-package storage
+package storage_test
 
 import (
 	"os"
 	"testing"
 
 	"github.com/Eanhain/gophkeeper-client/contracts/response"
+	"github.com/Eanhain/gophkeeper-client/internal/storage"
 )
 
-func testSecrets() *response.AllSecrets {
-	return &response.AllSecrets{
-		LoginPassword: []response.LoginPassword{
-			{Login: "admin", Password: "pass", Label: "work"},
-		},
-		TextSecret: []response.TextSecret{
-			{Title: "note", Body: "hello"},
-		},
-	}
+const testDBFile = ".gophkeeper_cache.db"
+
+func cleanup() {
+	os.Remove(testDBFile)
 }
 
-func TestCacheSetGet(t *testing.T) {
-	os.Remove(cacheFile)
-	defer os.Remove(cacheFile)
+func TestCache_SetAndGet(t *testing.T) {
+	defer cleanup()
 
-	c := NewCache("test-key")
+	cache := storage.NewCache("test-passphrase")
+	if err := cache.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer cache.Close()
 
-	if c.Get() != nil {
-		t.Fatal("empty cache must return nil")
+	// Initially empty.
+	if cache.Get() != nil {
+		t.Fatal("expected nil cache initially")
 	}
 
-	secrets := testSecrets()
-	if err := c.Set(secrets); err != nil {
+	secrets := &response.AllSecrets{
+		LoginPassword: []response.LoginPassword{
+			{Login: "admin", Password: "secret", Label: "test"},
+		},
+		TextSecret: []response.TextSecret{
+			{Title: "note", Body: "hello world"},
+		},
+	}
+
+	if err := cache.Set(secrets); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
-	got := c.Get()
+	got := cache.Get()
 	if got == nil {
-		t.Fatal("expected cached data")
+		t.Fatal("expected non-nil cache")
 	}
 	if len(got.LoginPassword) != 1 || got.LoginPassword[0].Login != "admin" {
-		t.Fatal("cached data mismatch")
+		t.Fatal("data mismatch")
+	}
+	if len(got.TextSecret) != 1 || got.TextSecret[0].Title != "note" {
+		t.Fatal("text data mismatch")
 	}
 }
 
-func TestCacheReset(t *testing.T) {
-	os.Remove(cacheFile)
-	defer os.Remove(cacheFile)
+func TestCache_Reset(t *testing.T) {
+	defer cleanup()
 
-	c := NewCache("test-key")
-	c.Set(testSecrets())
-	c.Reset()
-
-	if c.Get() != nil {
-		t.Fatal("reset cache must return nil")
+	cache := storage.NewCache("test-passphrase")
+	if err := cache.Load(); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(cacheFile); !os.IsNotExist(err) {
-		t.Fatal("cache file should be deleted after reset")
+	defer cache.Close()
+
+	_ = cache.Set(&response.AllSecrets{
+		LoginPassword: []response.LoginPassword{{Login: "a"}},
+	})
+
+	cache.Reset()
+	if cache.Get() != nil {
+		t.Fatal("expected nil after reset")
 	}
 }
 
-func TestCacheLoadFromDisk(t *testing.T) {
-	os.Remove(cacheFile)
-	defer os.Remove(cacheFile)
+func TestCache_PersistenceAcrossLoads(t *testing.T) {
+	defer cleanup()
 
-	c1 := NewCache("test-key")
-	c1.Set(testSecrets())
+	// Write data with first cache instance.
+	c1 := storage.NewCache("persist-key")
+	if err := c1.Load(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c1.Set(&response.AllSecrets{
+		CardSecret: []response.CardSecret{{Cardholder: "John", Pan: "1234"}},
+	})
+	_ = c1.Close()
 
-	c2 := NewCache("test-key")
+	// Read with a new cache instance (same key).
+	c2 := storage.NewCache("persist-key")
 	if err := c2.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
+	defer c2.Close()
 
 	got := c2.Get()
 	if got == nil {
-		t.Fatal("expected loaded data")
+		t.Fatal("expected persisted data")
 	}
-	if got.LoginPassword[0].Login != "admin" {
-		t.Fatal("loaded data mismatch")
-	}
-}
-
-func TestCacheLoadWrongKey(t *testing.T) {
-	os.Remove(cacheFile)
-	defer os.Remove(cacheFile)
-
-	c1 := NewCache("key1")
-	c1.Set(testSecrets())
-
-	c2 := NewCache("key2")
-	err := c2.Load()
-	if err == nil {
-		t.Fatal("expected error loading with wrong key")
+	if len(got.CardSecret) != 1 || got.CardSecret[0].Cardholder != "John" {
+		t.Fatal("data mismatch after reload")
 	}
 }
 
-func TestCacheLoadNoFile(t *testing.T) {
-	os.Remove(cacheFile)
-	c := NewCache("key")
-	if err := c.Load(); err != nil {
-		t.Fatalf("load missing file should not error: %v", err)
-	}
-	if c.Get() != nil {
-		t.Fatal("expected nil for missing file")
-	}
-}
+func TestCache_WrongKeyIgnored(t *testing.T) {
+	defer cleanup()
 
-func TestCacheSetNil(t *testing.T) {
-	os.Remove(cacheFile)
-	defer os.Remove(cacheFile)
-
-	c := NewCache("key")
-	if err := c.Set(nil); err != nil {
-		t.Fatalf("set nil: %v", err)
+	// Write with one key.
+	c1 := storage.NewCache("key1")
+	if err := c1.Load(); err != nil {
+		t.Fatal(err)
 	}
-	if c.Get() != nil {
-		t.Fatal("expected nil after set nil")
+	_ = c1.Set(&response.AllSecrets{
+		LoginPassword: []response.LoginPassword{{Login: "x"}},
+	})
+	_ = c1.Close()
+
+	// Try to read with a different key — should silently ignore.
+	c2 := storage.NewCache("key2")
+	if err := c2.Load(); err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+
+	if c2.Get() != nil {
+		t.Fatal("expected nil when loading with wrong key")
 	}
 }

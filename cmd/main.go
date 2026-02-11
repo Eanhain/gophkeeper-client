@@ -4,8 +4,8 @@
 // secrets stored on a GophKeeper server. It supports:
 //   - registration and login via JWT
 //   - CRUD operations on four secret types
-//   - encrypted local caching to reduce server round-trips
-//   - full-body AES-256-GCM encryption of all client-server traffic
+//   - encrypted local SQLite cache for offline access
+//   - retry logic with exponential backoff for network resilience
 //
 // Configuration is loaded from .env files, then overridden by CLI flags.
 // Run with -h to see available flags, or -v to print the version.
@@ -36,9 +36,13 @@ func main() {
 	}
 
 	// Wire up the dependency graph: HTTP client → cache → usecase → TUI.
-	client := clientconn.New(cfg.HTTP.Host, cfg.HTTP.Port, cfg.Crypto.Key)
+	client := clientconn.New(cfg.HTTP.Host, cfg.HTTP.Port)
 	cache := storage.NewCache(cfg.Crypto.Key)
-	cache.Load()
+	if err := cache.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "cache: %v\n", err)
+		os.Exit(1)
+	}
+	defer cache.Close()
 
 	uc := usecase.New(client, cache)
 
